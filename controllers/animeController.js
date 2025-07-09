@@ -1,8 +1,18 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const puppeteer = require('puppeteer');
+const chrome = require('chrome-aws-lambda');
+const puppeteer = require('puppeteer-core');
 
 const BASE_URL = 'https://www3.animeflv.net';
+
+// Función para inicializar el navegador
+const getBrowser = async () => {
+  return puppeteer.launch({
+    args: chrome.args,
+    executablePath: process.env.VERCEL ? await chrome.executablePath : '/usr/bin/google-chrome',
+    headless: true
+  });
+};
 
 const getAnimes = async (req, res) => {
   try {
@@ -113,7 +123,7 @@ async function getEpisodeStream(req, res) {
     const url = `${BASE_URL}/ver/${animeSlug}-${episodeNumber}`;
 
     // Puppeteer para renderizar JS y obtener variable videos
-    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const browser = await getBrowser();
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36');
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
