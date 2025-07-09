@@ -13,6 +13,11 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Ruta de prueba
+app.get('/', (req, res) => {
+  res.json({ message: 'API funcionando correctamente' });
+});
+
 // Rutas API
 app.use('/api', animeRoutes);
 
