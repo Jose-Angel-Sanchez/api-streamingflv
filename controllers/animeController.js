@@ -1,16 +1,29 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const chrome = require('chrome-aws-lambda');
+const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 
 const BASE_URL = 'https://www3.animeflv.net';
 
 // Función para inicializar el navegador
 const getBrowser = async () => {
+  // Configuración específica para Vercel
+  if (process.env.VERCEL) {
+    return puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
+    });
+  }
+  
+  // Configuración para desarrollo local
   return puppeteer.launch({
-    args: chrome.args,
-    executablePath: process.env.VERCEL ? await chrome.executablePath : '/usr/bin/google-chrome',
-    headless: true
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
+    headless: true,
+    ignoreHTTPSErrors: true
   });
 };
 
@@ -59,10 +72,18 @@ const getAnimeById = async (req, res) => {
     const url = `${BASE_URL}/anime/${id}`;
 
     const response = await axios.get(url);
+    if (!response.data) {
+      return res.status(404).json({ error: 'Anime no encontrado' });
+    }
+
     const rawHtml = response.data;
     const $ = cheerio.load(rawHtml);
 
     const title = $('h1.Title').text().trim();
+    if (!title) {
+      return res.status(404).json({ error: 'Anime no encontrado' });
+    }
+
     // Imagen de portada: intentar data-src o src de la etiqueta correcta
     let image = '';
     // Chequear atributo data-src
@@ -101,13 +122,24 @@ const getAnimeById = async (req, res) => {
       }
     });
 
-    res.json({ id, title, image, sinopsis, episodes });
+    res.json({
+      id,
+      title,
+      image,
+      sinopsis,
+      episodes
+    });
   } catch (error) {
     console.error('[ERROR en getAnimeById]:', error);
-    res.status(500).json({ message: 'Error al obtener el anime' });
+    if (error.response?.status === 404) {
+      res.status(404).json({ error: 'Anime no encontrado' });
+    } else {
+      res.status(500).json({ error: 'Error al obtener el anime', message: error.message });
+    }
   }
 };
 async function getEpisodeStream(req, res) {
+  let browser = null;
   try {
     // Aceptar ep o epId según ruta
     const ep = req.params.ep || req.params.epId;
@@ -123,19 +155,36 @@ async function getEpisodeStream(req, res) {
     const url = `${BASE_URL}/ver/${animeSlug}-${episodeNumber}`;
 
     // Puppeteer para renderizar JS y obtener variable videos
-    const browser = await getBrowser();
+    browser = await getBrowser();
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36');
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    
+    // Aumentar el timeout y manejar la espera
+    await page.setDefaultNavigationTimeout(60000);
+    console.log(`[INFO] Navegando a ${url}`);
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 60000 });
+    
+    // Esperar específicamente por el contenedor de videos
+    await page.waitForFunction(() => typeof window.videos !== 'undefined', { timeout: 30000 })
+      .catch(() => console.log('[WARN] Timeout esperando por window.videos'));
 
     const videosJSON = await page.evaluate(() => {
-      try { return JSON.stringify(window.videos || null); } catch { return null; }
+      try {
+        if (!window.videos) {
+          console.log('[WARN] window.videos is undefined');
+          return null;
+        }
+        return JSON.stringify(window.videos);
+      } catch (e) {
+        console.log('[ERROR] Error accessing window.videos:', e);
+        return null;
+      }
     });
-    await browser.close();
 
     if (!videosJSON) {
-      return res.status(404).json({ error: 'No se encontró la variable videos en la página o está inaccesible' });
+      throw new Error('No se pudieron obtener los videos del episodio');
     }
+
     const videos = JSON.parse(videosJSON);
     const sources = [];
     const addSources = (group, labelSuffix) => {
@@ -157,16 +206,33 @@ async function getEpisodeStream(req, res) {
         }
       });
     };
+
     addSources('SUB', '(Sub)');
     addSources('LAT', '(Lat)');
+
     if (sources.length === 0) {
-      return res.status(404).json({ error: 'No se encontraron servidores disponibles' });
+      throw new Error('No se encontraron servidores disponibles para este episodio');
     }
-    res.json({ title: `Episodio ${episodeNumber}`, sources });
+
+    res.json({
+      title: `Episodio ${episodeNumber}`,
+      sources
+    });
 
   } catch (error) {
-    console.error('[ERROR en getEpisodeStream Puppeteer]:', error);
-    res.status(500).json({ error: error.message });
+    console.error('[ERROR en getEpisodeStream]:', error);
+    res.status(500).json({
+      error: 'Error al obtener el episodio',
+      message: error.message
+    });
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (e) {
+        console.error('[ERROR] Error cerrando el navegador:', e);
+      }
+    }
   }
 }
 

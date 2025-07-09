@@ -6,9 +6,9 @@ const app = express();
 
 // Configurar CORS para permitir peticiones desde el frontend
 app.use(cors({
-  origin: ['https://streaming-flv.vercel.app', 'http://localhost:3000', 'http://127.0.0.1:3000'],
+  origin: '*',  // Permitir cualquier origen ya que estamos usando credentials: 'omit' en el frontend
   methods: ['GET', 'POST', 'OPTIONS'],
-  credentials: true
+  optionsSuccessStatus: 200
 }));
 app.use(express.json());
 
