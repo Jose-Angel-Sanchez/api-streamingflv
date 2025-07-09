@@ -3,7 +3,6 @@ const cors = require('cors');
 const animeRoutes = require('./routes/animeRoutes');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
 // Configurar CORS para permitir peticiones desde el frontend
 app.use(cors({
@@ -21,6 +20,23 @@ app.get('/', (req, res) => {
 // Rutas API
 app.use('/api', animeRoutes);
 
-app.listen(PORT, () => {
-  console.log(`API corriendo en puerto ${PORT}`);
+// Manejo de errores
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({
+    error: 'Error interno del servidor',
+    message: err.message
+  });
 });
+
+// En Vercel, necesitamos exportar la app en lugar de llamar a listen
+if (process.env.VERCEL) {
+  // Exportar para Vercel
+  module.exports = app;
+} else {
+  // Ejecutar normalmente para desarrollo local
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`API corriendo en puerto ${PORT}`);
+  });
+}

@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "main": "app.js",
   "engines": {
-    "node": ">=14.0.0"
+    "node": "18.x"
   },
   "scripts": {
     "start": "node app.js",
-    "vercel-build": "echo hello"
+    "build": "echo 'Build complete'",
+    "vercel-build": "echo 'Vercel build complete'"
   },
   "keywords": [],
   "author": "",
