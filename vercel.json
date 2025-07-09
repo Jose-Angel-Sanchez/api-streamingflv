@@ -6,15 +6,25 @@
       "use": "@vercel/node",
       "config": {
         "maxDuration": 60,
-        "memory": 3008
+        "memory": 3008,
+        "runtime": "nodejs18.x"
       }
     }
   ],
   "routes": [
     {
-      "src": "/(.*)",
+      "src": "/api/(.*)",
       "dest": "/app.js",
-      "methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+      "methods": ["GET", "POST", "OPTIONS"]
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/app.js"
     }
-  ]
+  ],
+  "env": {
+    "NODE_ENV": "production",
+    "CHROME_AWS_LAMBDA_CACHE": "1",
+    "DISABLE_DEBUGGER": "true"
+  }
 }

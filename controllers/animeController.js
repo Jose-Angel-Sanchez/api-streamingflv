@@ -3,27 +3,45 @@ const cheerio = require('cheerio');
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 
+// Configuración específica para Chromium
+chromium.setHeadlessMode = true;
+chromium.setGraphicsMode = false;
+
 const BASE_URL = 'https://www3.animeflv.net';
 
 // Función para inicializar el navegador
 const getBrowser = async () => {
-  // Configuración específica para Vercel
+  const options = {
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-features=site-per-process'
+    ],
+    headless: true,
+    ignoreHTTPSErrors: true
+  };
+
   if (process.env.VERCEL) {
+    // Configuración específica para Vercel
     return puppeteer.launch({
+      ...options,
+      executablePath: await chromium.executablePath(),
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-      ignoreHTTPSErrors: true,
+      headless: chromium.headless
     });
   }
   
   // Configuración para desarrollo local
   return puppeteer.launch({
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
-    headless: true,
-    ignoreHTTPSErrors: true
+    ...options,
+    executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome'
   });
 };
 
@@ -140,69 +158,279 @@ const getAnimeById = async (req, res) => {
 };
 async function getEpisodeStream(req, res) {
   let browser = null;
+  let page = null;
+  
   try {
-    // Aceptar ep o epId según ruta
+    console.log('[INFO] Iniciando getEpisodeStream');
+    
+    // Validar parámetros
     const ep = req.params.ep || req.params.epId;
     if (!ep) {
+      console.log('[ERROR] Episodio no especificado');
       return res.status(400).json({ error: 'Episodio no especificado' });
     }
+
+    // Parsear el ID del episodio
     const lastDashIndex = ep.lastIndexOf('-');
     if (lastDashIndex === -1) {
+      console.log('[ERROR] Formato de episodio inválido:', ep);
       return res.status(400).json({ error: 'Formato de episodio inválido, debe ser slug-episodio' });
     }
+
     const animeSlug = ep.substring(0, lastDashIndex);
     const episodeNumber = ep.substring(lastDashIndex + 1);
     const url = `${BASE_URL}/ver/${animeSlug}-${episodeNumber}`;
+    
+    console.log('[INFO] URL del episodio:', url);
 
-    // Puppeteer para renderizar JS y obtener variable videos
+    // Inicializar el navegador con más memoria
+    console.log('[INFO] Inicializando navegador');
     browser = await getBrowser();
-    const page = await browser.newPage();
+    console.log('[INFO] Navegador inicializado');
+
+    // Crear nueva página
+    page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36');
     
-    // Aumentar el timeout y manejar la espera
-    await page.setDefaultNavigationTimeout(60000);
-    console.log(`[INFO] Navegando a ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle0', timeout: 60000 });
-    
-    // Esperar específicamente por el contenedor de videos
-    await page.waitForFunction(() => typeof window.videos !== 'undefined', { timeout: 30000 })
-      .catch(() => console.log('[WARN] Timeout esperando por window.videos'));
+    // Exponer funciones para depuración
+    await page.exposeFunction('logToBackend', (message) => console.log('[PAGE]', message));
 
-    const videosJSON = await page.evaluate(() => {
-      try {
-        if (!window.videos) {
-          console.log('[WARN] window.videos is undefined');
-          return null;
-        }
-        return JSON.stringify(window.videos);
-      } catch (e) {
-        console.log('[ERROR] Error accessing window.videos:', e);
-        return null;
+    // Configurar interceptación más permisiva
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      const resourceType = request.resourceType();
+      const url = request.url().toLowerCase();
+      
+      // Permitir scripts y XHR que puedan contener información de videos
+      if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font' ||
+          (resourceType === 'script' && !url.includes('jquery') && !url.includes('script') && !url.includes('video'))) {
+        request.abort();
+      } else {
+        request.continue();
       }
     });
 
-    if (!videosJSON) {
-      throw new Error('No se pudieron obtener los videos del episodio');
+    // Monitorear la red para encontrar URLs de video
+    const videoUrls = new Set();
+    page.on('response', async (response) => {
+      const url = response.url().toLowerCase();
+      if (url.includes('video') || url.includes('stream') || url.includes('embed')) {
+        videoUrls.add(response.url());
+      }
+    });
+
+    // Escuchar errores de consola
+    page.on('console', msg => console.log('[BROWSER]', msg.text()));
+    page.on('pageerror', err => console.error('[BROWSER ERROR]', err.message));
+
+    // Configurar timeouts más largos
+    await page.setDefaultNavigationTimeout(60000);
+    console.log('[INFO] Navegando a la página');
+    
+    // Navegar y esperar a que la página esté completamente cargada
+    const response = await page.goto(url, { 
+      waitUntil: 'networkidle0',
+      timeout: 60000 
+    });
+
+    if (!response.ok()) {
+      throw new Error(`Error al cargar la página: ${response.status()} ${response.statusText()}`);
     }
 
-    const videos = JSON.parse(videosJSON);
+    // Inyectar jQuery para facilitar la manipulación del DOM
+    await page.evaluate(() => {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://code.jquery.com/jquery-3.6.0.min.js';
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    });
+
+    console.log('[INFO] Página cargada, extrayendo videos');
+
+    // Intentar extraer videos usando varios métodos
+    const videosJSON = await page.evaluate(async () => {
+      await window.logToBackend('Iniciando extracción de videos');
+      
+      // Función para esperar que un elemento esté disponible
+      const waitForElement = async (selector, timeout = 10000) => {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+          const element = document.querySelector(selector);
+          if (element) return element;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        return null;
+      };
+
+      // Esperar a que la página esté completamente cargada
+      await new Promise(resolve => {
+        if (document.readyState === 'complete') {
+          resolve();
+        } else {
+          window.addEventListener('load', resolve);
+        }
+      });
+
+      // Función para extraer videos de scripts
+      const extractVideosFromScripts = () => {
+        const scripts = document.getElementsByTagName('script');
+        for (const script of scripts) {
+          try {
+            const content = script.textContent || '';
+            // Buscar diferentes patrones de declaración de videos
+            const patterns = [
+              /var\s+videos\s*=\s*({[\s\S]*?});/,
+              /var\s+video\s*=\s*({[\s\S]*?});/,
+              /const\s+videos\s*=\s*({[\s\S]*?});/,
+              /let\s+videos\s*=\s*({[\s\S]*?});/
+            ];
+
+            for (const pattern of patterns) {
+              const match = content.match(pattern);
+              if (match && match[1]) {
+                try {
+                  return JSON.parse(match[1]);
+                } catch (e) {
+                  console.warn('Error parsing video data:', e);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('Error processing script:', e);
+          }
+        }
+        return null;
+      };
+
+      try {
+        // 1. Intentar obtener directamente de la variable global
+        if (window.videos) {
+          await window.logToBackend('Videos encontrados en variable global');
+          return JSON.stringify(window.videos);
+        }
+
+        // 2. Buscar en los scripts
+        const scriptVideos = extractVideosFromScripts();
+        if (scriptVideos) {
+          await window.logToBackend('Videos encontrados en scripts');
+          return JSON.stringify(scriptVideos);
+        }
+
+        // 3. Buscar iframes de video
+        const videoIframes = Array.from(document.querySelectorAll('iframe')).filter(iframe => {
+          const src = iframe.src.toLowerCase();
+          return src.includes('embed') || src.includes('video') || src.includes('player');
+        });
+
+        if (videoIframes.length > 0) {
+          await window.logToBackend('Videos encontrados en iframes');
+          return JSON.stringify({
+            SUB: videoIframes.map(iframe => ({
+              server: 'direct',
+              code: iframe.src
+            }))
+          });
+        }
+
+        // 4. Buscar enlaces de video directos
+        const videoLinks = Array.from(document.querySelectorAll('a')).filter(a => {
+          const href = a.href.toLowerCase();
+          return href.includes('embed') || href.includes('video') || href.includes('player');
+        });
+
+        if (videoLinks.length > 0) {
+          await window.logToBackend('Videos encontrados en enlaces');
+          return JSON.stringify({
+            SUB: videoLinks.map(link => ({
+              server: 'direct',
+              code: link.href
+            }))
+          });
+        }
+
+      } catch (e) {
+        await window.logToBackend('Error extrayendo videos: ' + e.message);
+        console.error(e);
+      }
+      
+      return null;
+    });
+
+    // Si no encontramos videos en el DOM, intentar usar las URLs capturadas
+    let videos;
+    if (videosJSON) {
+      videos = typeof videosJSON === 'string' ? JSON.parse(videosJSON) : videosJSON;
+    } else if (videoUrls.size > 0) {
+      videos = {
+        SUB: Array.from(videoUrls).map(url => ({
+          server: 'direct',
+          code: url
+        }))
+      };
+    } else {
+      throw new Error('No se encontraron videos disponibles');
+    }
+
     const sources = [];
+    console.log('[INFO] Procesando servidores de video');
+
     const addSources = (group, labelSuffix) => {
       if (!videos[group]) return;
       videos[group].forEach(entry => {
-        if (entry.code) {
-          let embedUrl = '';
-          switch (entry.server) {
-            case 'fembed': embedUrl = `https://www.fembed.com/v/${entry.code}`; break;
-            case 'doodstream':
-            case 'dood': embedUrl = `https://dood.la/e/${entry.code}`; break;
-            case 'okru': embedUrl = `https://ok.ru/videoembed/${entry.code}`; break;
-            case 'streamtape': embedUrl = `https://streamtape.com/e/${entry.code}`; break;
-            case 'yourupload': embedUrl = `https://yourupload.com/embed/${entry.code}`; break;
-            case 'mp4upload': embedUrl = `https://www.mp4upload.com/embed-${entry.code}.html`; break;
-            default: embedUrl = entry.code;
-          }
-          sources.push({ label: `${entry.server.toUpperCase()} ${labelSuffix}`, url: embedUrl });
+        if (!entry || !entry.code) {
+          console.log(`[WARN] Entrada inválida en grupo ${group}:`, entry);
+          return;
+        }
+
+        let embedUrl = '';
+        const server = entry.server ? entry.server.toLowerCase() : 'direct';
+        
+        switch (server) {
+          case 'fembed':
+            embedUrl = `https://www.fembed.com/v/${entry.code}`;
+            break;
+          case 'doodstream':
+          case 'dood':
+            embedUrl = `https://dood.la/e/${entry.code}`;
+            break;
+          case 'okru':
+          case 'ok.ru':
+            embedUrl = `https://ok.ru/videoembed/${entry.code}`;
+            break;
+          case 'streamtape':
+            embedUrl = `https://streamtape.com/e/${entry.code}`;
+            break;
+          case 'yourupload':
+            embedUrl = `https://yourupload.com/embed/${entry.code}`;
+            break;
+          case 'mp4upload':
+            embedUrl = `https://www.mp4upload.com/embed-${entry.code}.html`;
+            break;
+          case 'fireload':
+            embedUrl = `https://fireload.com/embed/${entry.code}`;
+            break;
+          case 'sendvid':
+            embedUrl = `https://sendvid.com/embed/${entry.code}`;
+            break;
+          case 'direct':
+            embedUrl = entry.code;
+            break;
+          default:
+            console.log(`[WARN] Servidor desconocido: ${server}`);
+            if (entry.code.includes('http')) {
+              embedUrl = entry.code;
+            }
+        }
+        
+        if (embedUrl) {
+          sources.push({
+            label: `${server.toUpperCase()} ${labelSuffix}`,
+            url: embedUrl,
+            type: server
+          });
         }
       });
     };
@@ -214,24 +442,33 @@ async function getEpisodeStream(req, res) {
       throw new Error('No se encontraron servidores disponibles para este episodio');
     }
 
+    console.log('[INFO] Fuentes encontradas:', sources.length);
+    
     res.json({
       title: `Episodio ${episodeNumber}`,
-      sources
+      sources: sources
     });
 
   } catch (error) {
-    console.error('[ERROR en getEpisodeStream]:', error);
+    console.error('[ERROR] getEpisodeStream:', error);
+    console.error(error.stack);
+    
     res.status(500).json({
       error: 'Error al obtener el episodio',
-      message: error.message
+      message: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
+    
   } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (e) {
-        console.error('[ERROR] Error cerrando el navegador:', e);
+    try {
+      if (page) {
+        await page.close();
       }
+      if (browser) {
+        await browser.close();
+      }
+    } catch (closeError) {
+      console.error('[ERROR] Error al cerrar el navegador:', closeError);
     }
   }
 }

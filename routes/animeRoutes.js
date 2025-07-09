@@ -7,10 +7,17 @@ const {
   scrapeAnimeFLV,
 } = require('../controllers/animeController');
 
+// Ruta principal para listar animes
 router.get('/animes', getAnimes);
+
+// Rutas para detalles de anime
 router.get('/anime/:id', getAnimeById);
+router.get('/animes/:id', getAnimeById); // Ruta alternativa para compatibilidad
+
+// Rutas para streaming de episodios
 router.get('/watch/:epId', getEpisodeStream);
-router.get('/episode/:ep', getEpisodeStream);
+router.get('/ver/:epId', getEpisodeStream);   // Alias en español
+router.get('/episode/:epId', getEpisodeStream); // Alias adicional
 
 router.get('/search', async (req, res) => {
   const query = req.query.q;
