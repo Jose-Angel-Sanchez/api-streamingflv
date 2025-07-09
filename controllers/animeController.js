@@ -1,49 +1,10 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const chromium = require('@sparticuz/chromium');
-const puppeteer = require('puppeteer-core');
-
-// Configuración específica para Chromium
-chromium.setHeadlessMode = true;
-chromium.setGraphicsMode = false;
 
 const BASE_URL = 'https://www3.animeflv.net';
 
 // Función para inicializar el navegador
-const getBrowser = async () => {
-  const options = {
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-features=site-per-process'
-    ],
-    headless: true,
-    ignoreHTTPSErrors: true
-  };
-
-  if (process.env.VERCEL) {
-    // Configuración específica para Vercel
-    return puppeteer.launch({
-      ...options,
-      executablePath: await chromium.executablePath(),
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      headless: chromium.headless
-    });
-  }
-  
-  // Configuración para desarrollo local
-  return puppeteer.launch({
-    ...options,
-    executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome'
-  });
-};
+// Removed Puppeteer code as we're using axios+cheerio
 
 const getAnimes = async (req, res) => {
   try {
@@ -156,232 +117,116 @@ const getAnimeById = async (req, res) => {
     }
   }
 };
-async function getEpisodeStream(req, res) {
-  let browser = null;
-  let page = null;
-  
+const getEpisodeStream = async (req, res) => {
   try {
     console.log('[INFO] Iniciando getEpisodeStream');
+    const episodeId = req.params.epId;
     
-    // Validar parámetros
-    const ep = req.params.ep || req.params.epId;
-    if (!ep) {
-      console.log('[ERROR] Episodio no especificado');
-      return res.status(400).json({ error: 'Episodio no especificado' });
+    if (!episodeId) {
+      throw new Error('ID de episodio no proporcionado');
     }
 
-    // Parsear el ID del episodio
-    const lastDashIndex = ep.lastIndexOf('-');
-    if (lastDashIndex === -1) {
-      console.log('[ERROR] Formato de episodio inválido:', ep);
-      return res.status(400).json({ error: 'Formato de episodio inválido, debe ser slug-episodio' });
-    }
+    console.log(`[INFO] Obteniendo episodio: ${episodeId}`);
+    const url = `${BASE_URL}/ver/${episodeId}`;
+    console.log(`[INFO] URL del episodio: ${url}`);
 
-    const animeSlug = ep.substring(0, lastDashIndex);
-    const episodeNumber = ep.substring(lastDashIndex + 1);
-    const url = `${BASE_URL}/ver/${animeSlug}-${episodeNumber}`;
-    
-    console.log('[INFO] URL del episodio:', url);
-
-    // Inicializar el navegador con más memoria
-    console.log('[INFO] Inicializando navegador');
-    browser = await getBrowser();
-    console.log('[INFO] Navegador inicializado');
-
-    // Crear nueva página
-    page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36');
-    
-    // Exponer funciones para depuración
-    await page.exposeFunction('logToBackend', (message) => console.log('[PAGE]', message));
-
-    // Configurar interceptación más permisiva
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-      const resourceType = request.resourceType();
-      const url = request.url().toLowerCase();
-      
-      // Permitir scripts y XHR que puedan contener información de videos
-      if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font' ||
-          (resourceType === 'script' && !url.includes('jquery') && !url.includes('script') && !url.includes('video'))) {
-        request.abort();
-      } else {
-        request.continue();
+    const { data } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
     });
 
-    // Monitorear la red para encontrar URLs de video
-    const videoUrls = new Set();
-    page.on('response', async (response) => {
-      const url = response.url().toLowerCase();
-      if (url.includes('video') || url.includes('stream') || url.includes('embed')) {
-        videoUrls.add(response.url());
-      }
-    });
+    const $ = cheerio.load(data);
+    console.log('[INFO] Página cargada correctamente');
 
-    // Escuchar errores de consola
-    page.on('console', msg => console.log('[BROWSER]', msg.text()));
-    page.on('pageerror', err => console.error('[BROWSER ERROR]', err.message));
+    const episodeNumber = $('h1.Title').text().match(/Episodio\s+(\d+)/i)?.[1] || 'Desconocido';
+    console.log(`[INFO] Número de episodio: ${episodeNumber}`);
 
-    // Configurar timeouts más largos
-    await page.setDefaultNavigationTimeout(60000);
-    console.log('[INFO] Navegando a la página');
+    let videoData = null;
+    const scripts = $('script').filter((_, el) => $(el).html()?.includes('videos'));
     
-    // Navegar y esperar a que la página esté completamente cargada
-    const response = await page.goto(url, { 
-      waitUntil: 'networkidle0',
-      timeout: 60000 
-    });
-
-    if (!response.ok()) {
-      throw new Error(`Error al cargar la página: ${response.status()} ${response.statusText()}`);
-    }
-
-    // Inyectar jQuery para facilitar la manipulación del DOM
-    await page.evaluate(() => {
-      return new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.src = 'https://code.jquery.com/jquery-3.6.0.min.js';
-        script.onload = resolve;
-        script.onerror = reject;
-        document.head.appendChild(script);
-      });
-    });
-
-    console.log('[INFO] Página cargada, extrayendo videos');
-
-    // Intentar extraer videos usando varios métodos
-    const videosJSON = await page.evaluate(async () => {
-      await window.logToBackend('Iniciando extracción de videos');
+    console.log(`[INFO] Scripts encontrados: ${scripts.length}`);
+    
+    scripts.each((_, script) => {
+      const content = $(script).html() || '';
       
-      // Función para esperar que un elemento esté disponible
-      const waitForElement = async (selector, timeout = 10000) => {
-        const start = Date.now();
-        while (Date.now() - start < timeout) {
-          const element = document.querySelector(selector);
-          if (element) return element;
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-        return null;
-      };
+      // Patrones comunes para encontrar la data de videos
+      const patterns = [
+        /var\s+videos\s*=\s*({[\s\S]*?});/,
+        /let\s+videos\s*=\s*({[\s\S]*?});/,
+        /videos\s*=\s*({[\s\S]*?});/
+      ];
 
-      // Esperar a que la página esté completamente cargada
-      await new Promise(resolve => {
-        if (document.readyState === 'complete') {
-          resolve();
-        } else {
-          window.addEventListener('load', resolve);
-        }
-      });
-
-      // Función para extraer videos de scripts
-      const extractVideosFromScripts = () => {
-        const scripts = document.getElementsByTagName('script');
-        for (const script of scripts) {
+      for (const pattern of patterns) {
+        const match = content.match(pattern);
+        if (match && match[1]) {
           try {
-            const content = script.textContent || '';
-            // Buscar diferentes patrones de declaración de videos
-            const patterns = [
-              /var\s+videos\s*=\s*({[\s\S]*?});/,
-              /var\s+video\s*=\s*({[\s\S]*?});/,
-              /const\s+videos\s*=\s*({[\s\S]*?});/,
-              /let\s+videos\s*=\s*({[\s\S]*?});/
-            ];
-
-            for (const pattern of patterns) {
-              const match = content.match(pattern);
-              if (match && match[1]) {
-                try {
-                  return JSON.parse(match[1]);
-                } catch (e) {
-                  console.warn('Error parsing video data:', e);
-                }
-              }
+            const parsed = JSON.parse(match[1]);
+            if (parsed && (parsed.SUB || parsed.LAT)) {
+              console.log('[INFO] Data de videos encontrada y parseada correctamente');
+              videoData = parsed;
+              break;
             }
           } catch (e) {
-            console.warn('Error processing script:', e);
+            console.warn('[WARN] Error parsing video data:', e.message);
           }
         }
-        return null;
-      };
-
-      try {
-        // 1. Intentar obtener directamente de la variable global
-        if (window.videos) {
-          await window.logToBackend('Videos encontrados en variable global');
-          return JSON.stringify(window.videos);
-        }
-
-        // 2. Buscar en los scripts
-        const scriptVideos = extractVideosFromScripts();
-        if (scriptVideos) {
-          await window.logToBackend('Videos encontrados en scripts');
-          return JSON.stringify(scriptVideos);
-        }
-
-        // 3. Buscar iframes de video
-        const videoIframes = Array.from(document.querySelectorAll('iframe')).filter(iframe => {
-          const src = iframe.src.toLowerCase();
-          return src.includes('embed') || src.includes('video') || src.includes('player');
-        });
-
-        if (videoIframes.length > 0) {
-          await window.logToBackend('Videos encontrados en iframes');
-          return JSON.stringify({
-            SUB: videoIframes.map(iframe => ({
-              server: 'direct',
-              code: iframe.src
-            }))
-          });
-        }
-
-        // 4. Buscar enlaces de video directos
-        const videoLinks = Array.from(document.querySelectorAll('a')).filter(a => {
-          const href = a.href.toLowerCase();
-          return href.includes('embed') || href.includes('video') || href.includes('player');
-        });
-
-        if (videoLinks.length > 0) {
-          await window.logToBackend('Videos encontrados en enlaces');
-          return JSON.stringify({
-            SUB: videoLinks.map(link => ({
-              server: 'direct',
-              code: link.href
-            }))
-          });
-        }
-
-      } catch (e) {
-        await window.logToBackend('Error extrayendo videos: ' + e.message);
-        console.error(e);
       }
-      
-      return null;
     });
 
-    // Si no encontramos videos en el DOM, intentar usar las URLs capturadas
-    let videos;
-    if (videosJSON) {
-      videos = typeof videosJSON === 'string' ? JSON.parse(videosJSON) : videosJSON;
-    } else if (videoUrls.size > 0) {
-      videos = {
-        SUB: Array.from(videoUrls).map(url => ({
-          server: 'direct',
-          code: url
-        }))
-      };
-    } else {
+    // Si no encontramos videos en el script, buscar iframes
+    if (!videoData) {
+      console.log('[INFO] Buscando iframes...');
+      const iframes = $('iframe').filter((_, el) => {
+        const src = $(el).attr('src') || '';
+        return src.includes('embed') || src.includes('video') || src.includes('player');
+      });
+
+      console.log(`[INFO] Iframes encontrados: ${iframes.length}`);
+
+      if (iframes.length > 0) {
+        videoData = {
+          SUB: Array.from(iframes).map(iframe => ({
+            server: 'direct',
+            code: $(iframe).attr('src')
+          }))
+        };
+      }
+    }
+
+    // Si aún no tenemos videos, buscar enlaces directos
+    if (!videoData) {
+      console.log('[INFO] Buscando enlaces directos...');
+      const videoLinks = $('a').filter((_, el) => {
+        const href = $(el).attr('href') || '';
+        return href.includes('embed') || href.includes('video') || href.includes('player');
+      });
+
+      console.log(`[INFO] Enlaces directos encontrados: ${videoLinks.length}`);
+
+      if (videoLinks.length > 0) {
+        videoData = {
+          SUB: Array.from(videoLinks).map(link => ({
+            server: 'direct',
+            code: $(link).attr('href')
+          }))
+        };
+      }
+    }
+
+    if (!videoData) {
       throw new Error('No se encontraron videos disponibles');
     }
 
     const sources = [];
     console.log('[INFO] Procesando servidores de video');
 
+    // Procesar servidores
     const addSources = (group, labelSuffix) => {
-      if (!videos[group]) return;
-      videos[group].forEach(entry => {
+      if (!videoData[group]) return;
+      videoData[group].forEach((entry, index) => {
         if (!entry || !entry.code) {
-          console.log(`[WARN] Entrada inválida en grupo ${group}:`, entry);
+          console.log(`[WARN] Entrada inválida en grupo ${group} índice ${index}:`, entry);
           return;
         }
 
@@ -431,6 +276,7 @@ async function getEpisodeStream(req, res) {
             url: embedUrl,
             type: server
           });
+          console.log(`[INFO] Añadida fuente: ${server} ${labelSuffix}`);
         }
       });
     };
@@ -442,7 +288,7 @@ async function getEpisodeStream(req, res) {
       throw new Error('No se encontraron servidores disponibles para este episodio');
     }
 
-    console.log('[INFO] Fuentes encontradas:', sources.length);
+    console.log('[INFO] Total de fuentes encontradas:', sources.length);
     
     res.json({
       title: `Episodio ${episodeNumber}`,
@@ -450,76 +296,60 @@ async function getEpisodeStream(req, res) {
     });
 
   } catch (error) {
-    console.error('[ERROR] getEpisodeStream:', error);
-    console.error(error.stack);
+    console.error('[ERROR] getEpisodeStream:', error.message);
+    console.error('[ERROR] Stack:', error.stack);
     
-    res.status(500).json({
-      error: 'Error al obtener el episodio',
-      message: error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-    
-  } finally {
-    try {
-      if (page) {
-        await page.close();
-      }
-      if (browser) {
-        await browser.close();
-      }
-    } catch (closeError) {
-      console.error('[ERROR] Error al cerrar el navegador:', closeError);
+    if (error.response) {
+      console.error('[ERROR] Response status:', error.response.status);
+      console.error('[ERROR] Response headers:', error.response.headers);
+    }
+
+    if (error.response?.status === 404) {
+      res.status(404).json({
+        error: 'Episodio no encontrado',
+        message: 'No se pudo encontrar el episodio solicitado'
+      });
+    } else {
+      res.status(500).json({
+        error: 'Error al obtener el episodio',
+        message: error.message,
+        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
     }
   }
-}
-
+};
 async function scrapeAnimeFLV(query) {
-  const browser = await puppeteer.launch();
-  const page = await browser.newPage();
-  const searchUrl = `https://www.animeflv.net/browse?q=${encodeURIComponent(query)}`;
-
   try {
-    console.log(`Navegando a URL: ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
-
-    const results = [];
-    const maxPages = 3; // Limitar el número de páginas para mejorar el rendimiento
-
-    for (let i = 1; i <= maxPages; i++) {
-      console.log(`Scraping página ${i}...`);
-      const pageResults = await page.evaluate(() => {
-        const animes = [];
-        const cards = document.querySelectorAll('.Anime.alt.Browse .Container .Item');
-        cards.forEach(card => {
-          const title = card.querySelector('.Title')?.textContent.trim();
-          const image = card.querySelector('img')?.getAttribute('src');
-          const sinopsis = card.querySelector('.Description')?.textContent.trim();
-          const id = card.querySelector('a')?.getAttribute('href').split('/').pop();
-          if (title && image && id) {
-            animes.push({ title, image, sinopsis, id });
-          }
-        });
-        return animes;
-      });
-      console.log(`Resultados obtenidos en página ${i}:`, pageResults);
-      results.push(...pageResults);
-
-      // Intentar ir a la siguiente página
-      const nextPageLink = await page.$('.pagination .next');
-      if (nextPageLink) {
-        await nextPageLink.click();
-        await page.waitForNavigation({ waitUntil: 'domcontentloaded' });
-      } else {
-        break;
+    console.log(`[INFO] Iniciando búsqueda para: ${query}`);
+    const searchUrl = `${BASE_URL}/browse?q=${encodeURIComponent(query)}`;
+    
+    const { data } = await axios.get(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
-    }
+    });
 
-    await browser.close();
+    const $ = cheerio.load(data);
+    const results = [];
+
+    $('.Anime.alt.Browse .Container .Item').each((_, element) => {
+      const el = $(element);
+      const title = el.find('.Title').text().trim();
+      const image = el.find('img').attr('src');
+      const sinopsis = el.find('.Description').text().trim();
+      const id = el.find('a').attr('href')?.split('/').pop();
+
+      if (title && image && id) {
+        results.push({ title, image, sinopsis, id });
+      }
+    });
+
+    console.log(`[INFO] Se encontraron ${results.length} resultados`);
     return results;
+
   } catch (error) {
-    console.error(`Error durante el scraping: ${error.message}`);
-    await browser.close();
-    throw new Error('Error al realizar el scraping en AnimeFLV');
+    console.error(`[ERROR] Error durante la búsqueda:`, error);
+    throw new Error('Error al buscar en AnimeFLV');
   }
 }
 
