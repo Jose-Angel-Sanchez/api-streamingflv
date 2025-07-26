@@ -37,8 +37,14 @@ const getAnimes = async (req, res) => {
       const id = link ? link.split('/').pop() : '';
       const sinopsis = $(el).find('.Description p').last().text().trim();
       const seguidores = $(el).find('.Flwrs span').text().trim();
+      // Extraer géneros
+      let genre = [];
+      $(el).find('.Genres a').each((_, genreEl) => {
+        const genreText = $(genreEl).text().trim();
+        if (genreText) genre.push(genreText);
+      });
       if (title && image && id) {
-        animes.push({ id, title, image, sinopsis, seguidores });
+        animes.push({ id, title, image, sinopsis, seguidores, genre });
       }
     });
 
