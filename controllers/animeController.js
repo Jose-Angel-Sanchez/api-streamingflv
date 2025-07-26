@@ -1,5 +1,5 @@
-const axios = require('axios');
-const cheerio = require('cheerio');
+import { get } from 'axios';
+import { load } from 'cheerio';
 
 const BASE_URL = 'https://www3.animeflv.net';
 
@@ -12,22 +12,16 @@ const getAnimes = async (req, res) => {
     const page = req.query.page || 1;
 
     // Verificar si es una URL de AnimeFLV
+    // Si la query es una URL de AnimeFLV, puedes procesarla con processAnimeFlvUrl
     if (query.includes('animeflv.net/anime/')) {
-      const anime = await processAnimeFlvUrl(query);
-      if (anime) {
-        return res.json({
-          animes: [anime],
-          totalPages: 1,
-          directMatch: true
-        });
-      }
+      const animeData = await processAnimeFlvUrl(query);
+      return res.json({ animes: animeData ? [animeData] : [], totalPages: 1 });
     }
 
-    // Si no es una URL o hubo error, realizar búsqueda normal
     const url = `${BASE_URL}/browse?term=${encodeURIComponent(query)}&page=${page}`;
 
-    const { data } = await axios.get(url);
-    const $ = cheerio.load(data);
+    const { data } = await get(url);
+    const $ = load(data);
 
     const animes = [];
     $('article.Anime').each((i, el) => {
@@ -37,10 +31,29 @@ const getAnimes = async (req, res) => {
       const id = link ? link.split('/').pop() : '';
       const sinopsis = $(el).find('.Description p').last().text().trim();
       const seguidores = $(el).find('.Flwrs span').text().trim();
+      // Extraer géneros
+      let genre = [];
+      $(el).find('.Genres a').each((_, genreEl) => {
+        const genreText = $(genreEl).text().trim();
+        if (genreText) genre.push(genreText);
+      });
       if (title && image && id) {
-        animes.push({ id, title, image, sinopsis, seguidores });
+        animes.push({ id, title, image, sinopsis, seguidores, genre });
       }
     });
+
+    // Permitir múltiples géneros: genre puede ser string o array
+    let filteredAnimes = animes;
+    let filterGenres = req.query.genre;
+    if (filterGenres) {
+      if (!Array.isArray(filterGenres)) filterGenres = [filterGenres];
+      const normalize = (str) => str.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+      const normalizedFilters = filterGenres.map(normalize);
+      filteredAnimes = animes.filter(anime =>
+        Array.isArray(anime.genre) &&
+        anime.genre.some(g => normalizedFilters.includes(normalize(g)))
+      );
+    }
 
     // Extraer el número total de páginas
     let totalPages = 1;
@@ -51,26 +64,24 @@ const getAnimes = async (req, res) => {
         if (!isNaN(num) && num > totalPages) totalPages = num;
       });
     }
-
-    res.json({ animes, totalPages });
+    res.json({ animes: filteredAnimes, totalPages });
   } catch (error) {
     console.error('[ERROR en getAnimes]:', error);
+}
     res.status(500).json({ animes: [], totalPages: 1, message: 'Error al buscar animes' });
   }
-};
 
 const getAnimeById = async (req, res) => {
   try {
     const { id } = req.params;
     const url = `${BASE_URL}/anime/${id}`;
-
-    const response = await axios.get(url);
+    const response = await get(url);
     if (!response.data) {
       return res.status(404).json({ error: 'Anime no encontrado' });
     }
 
     const rawHtml = response.data;
-    const $ = cheerio.load(rawHtml);
+    const $ = load(rawHtml);
 
     const title = $('h1.Title').text().trim();
     if (!title) {
@@ -144,13 +155,13 @@ const getEpisodeStream = async (req, res) => {
     const url = `${BASE_URL}/ver/${episodeId}`;
     console.log(`[INFO] URL del episodio: ${url}`);
 
-    const { data } = await axios.get(url, {
+    const { data } = await get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
     });
 
-    const $ = cheerio.load(data);
+    const $ = load(data);
     console.log('[INFO] Página cargada correctamente');
 
     const episodeNumber = $('h1.Title').text().match(/Episodio\s+(\d+)/i)?.[1] || 'Desconocido';
@@ -337,13 +348,13 @@ async function scrapeAnimeFLV(query) {
     console.log(`[INFO] Iniciando búsqueda para: ${query}`);
     const searchUrl = `${BASE_URL}/browse?q=${encodeURIComponent(query)}`;
     
-    const { data } = await axios.get(searchUrl, {
+    const { data } = await get(searchUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
     });
 
-    const $ = cheerio.load(data);
+    const $ = load(data);
     const results = [];
 
     $('.Anime.alt.Browse .Container .Item').each((_, element) => {
@@ -374,13 +385,13 @@ async function processAnimeFlvUrl(url) {
     
     console.log(`[INFO] Procesando URL de AnimeFLV: ${directUrl}`);
     
-    const { data } = await axios.get(directUrl, {
+    const { data } = await get(directUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
     });
     
-    const $ = cheerio.load(data);
+    const $ = load(data);
     
     // Extraer información del anime
     const title = $('h1.Title').text().trim();
@@ -433,4 +444,3 @@ module.exports = {
   scrapeAnimeFLV,
   processAnimeFlvUrl,
 };
-// Este archivo contiene las funciones del controlador para manejar las solicitudes relacionadas con los animes.
